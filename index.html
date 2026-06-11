@@ -3,13 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<!-- Cross-origin isolation for SharedArrayBuffer (ffmpeg multithread) on GitHub Pages.
-     Must load before anything else so it can take control and reload once. -->
-<script src="coi-serviceworker.js"></script>
 <title>Encoder · YouTube Video Optimizer</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
   :root {
     --bg:        #0e1116;
@@ -313,17 +310,11 @@
 import { FFmpeg } from 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js';
 import { toBlobURL } from 'https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js';
 
-// Because the class worker runs as a module worker, we use the esm builds
-// (the core is pulled in via dynamic import(), which needs a default export).
+// Single-threaded ffmpeg.wasm — no SharedArrayBuffer / cross-origin isolation
+// needed, so no service worker required. Works on plain static hosting.
 const FFMPEG_ESM = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm';
-const CORE_ST    = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm';     // single-thread
-const CORE_MT    = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core-mt@0.12.10/dist/esm';  // multi-thread
-
-// Multithreading needs SharedArrayBuffer, which needs cross-origin isolation.
-// The service worker (coi-serviceworker.js) provides the COOP/COEP headers on
-// GitHub Pages; if isolation isn't available we fall back to single-thread.
-const MULTITHREAD = self.crossOriginIsolated === true;
-const MODE = MULTITHREAD ? `multi-threaded · ${navigator.hardwareConcurrency || 'n'} cores` : 'single-threaded';
+const CORE       = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm';
+const MODE = 'single-threaded';
 
 // Safe logger: some browser extensions replace/strip console methods, so a bare
 // console call can throw and break the whole script. Guard every diagnostic call.
@@ -331,12 +322,8 @@ const dbg = (...a) => { try { (console && console.log || (() => {}))(...a); } ca
 
 // Bump this when you deploy. It's shown in the footer and logged to the console,
 // so you can instantly tell whether the new version is actually live (vs cached).
-const BUILD = 'workerfs-5';
-dbg('[ytconverter] build:', BUILD,
-    '| isolated:', self.crossOriginIsolated,
-    '| controlled:', !!(navigator.serviceWorker && navigator.serviceWorker.controller),
-    '| SharedArrayBuffer:', typeof SharedArrayBuffer !== 'undefined',
-    '| mode:', MODE);
+const BUILD = 'workerfs-7';
+dbg('[ytconverter] build:', BUILD, '| host:', location.host, '| mode:', MODE);
 
 // With WORKERFS the input is read lazily, so input size is no longer the wall —
 // the limit is the (compressed) output plus codec memory in 32-bit WASM. We allow
@@ -459,6 +446,10 @@ async function ensureLoaded() {
   let progressLogged = false;
   ffmpeg.on('progress', (e) => {
     if (!progressLogged) { progressLogged = true; dbg('[ytconverter] first progress event:', JSON.stringify(e)); }
+    // If the log-based parser is already driving progress, ignore empty/garbled
+    // progress events (no time or e.time <= 0) so they don't overwrite the
+    // working counter (multi-threaded encodes sometimes emit bad values here).
+    if (sawProgress && (typeof e?.time !== 'number' || e.time <= 0)) return;
     const t = (typeof e?.time === 'number') ? e.time / 1e6 : null;        // microseconds → seconds
     const prog = (typeof e?.progress === 'number') ? e.progress : null;  // 0..1 ratio
     let cur = null;
@@ -486,18 +477,11 @@ async function ensureLoaded() {
     code => code.replace(/((?:from|import)\s*\(?\s*["'])\.\//g, `$1${FFMPEG_ESM}/`)
   );
 
-  const base = MULTITHREAD ? CORE_MT : CORE_ST;
-  const config = {
+  await ffmpeg.load({
     classWorkerURL,
-    coreURL: await toBlobURL(`${base}/ffmpeg-core.js`, 'text/javascript'),
-    wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm'),
-  };
-  // The multi-thread core needs its own pthread worker (same-origin via blob).
-  if (MULTITHREAD) {
-    config.workerURL = await toBlobURL(`${base}/ffmpeg-core.worker.js`, 'text/javascript');
-  }
-
-  await ffmpeg.load(config);
+    coreURL: await toBlobURL(`${CORE}/ffmpeg-core.js`, 'text/javascript'),
+    wasmURL: await toBlobURL(`${CORE}/ffmpeg-core.wasm`, 'application/wasm'),
+  });
   loaded = true;
 }
 
