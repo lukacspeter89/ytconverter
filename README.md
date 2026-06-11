@@ -1,35 +1,61 @@
-# Felvétel → YouTube konverter
+# Encoder · YouTube Video Optimizer
 
-Képernyőfelvételek tömörítése YouTube-kompatibilis MP4-re, **teljesen a böngészőben**.
-Az [ffmpeg.wasm](https://ffmpegwasm.netlify.app/) (WebAssembly-re fordított ffmpeg)
-végzi a kódolást — a videó **nem töltődik fel sehova**, minden a felhasználó gépén történik.
+Compress and optimize screen recordings into YouTube-compatible MP4 **entirely in the browser**.
+[ffmpeg.wasm](https://ffmpegwasm.netlify.app/) (ffmpeg compiled to WebAssembly) does the encoding —
+the video **never leaves the user's device**.
 
-## Mit csinál
+## What it does
 
-- H.264 (`libx264`, `high` profil, `yuv420p`) + AAC hang, `+faststart` — a YouTube ajánlott formátuma
-- Állítható minőség (CRF), felbontás-korlát (csak lefelé skáláz), fps-korlát, kódolási sebesség
-- A kész fájl az eredeti néven, `_small` végződéssel töltődik le
+- H.264 (`libx264`, `high` profile, `yuv420p`) + AAC audio, `+faststart` — YouTube's recommended format
+- Adjustable quality (CRF), resolution cap (downscale only), frame-rate cap, encode speed
+- Output downloads under the original name with a `_small` suffix
+- **Multi-threaded** ffmpeg when the browser is cross-origin isolated; automatic single-thread fallback otherwise
 
-## Élő verzió
+## Files
 
-GitHub Pages-en: `https://<felhasznalonev>.github.io/<repo-nev>/`
+| File | Purpose |
+|------|---------|
+| `index.html` | The app (UI + ffmpeg loading logic) |
+| `coi-serviceworker.js` | Adds COOP/COEP headers so `SharedArrayBuffer` (multithreading) works on GitHub Pages |
+| `.nojekyll` | Tells GitHub Pages to skip Jekyll processing |
 
-## GitHub Pages bekapcsolása
+All three must sit in the repository root.
 
-1. Töltsd fel az `index.html` fájlt a repo gyökerébe.
-2. **Settings → Pages**
-3. **Source: Deploy from a branch**, branch: `main`, mappa: `/ (root)`, majd **Save**.
-4. Pár perc múlva elérhető a fenti URL-en.
+## Deploy on GitHub Pages
 
-## Korlátok
+1. Push `index.html`, `coi-serviceworker.js`, and `.nojekyll` to the repo root.
+2. **Settings → Pages → Source: Deploy from a branch**, branch `main`, folder `/ (root)`, **Save**.
+3. Open `https://<username>.github.io/<repo>/`.
 
-- A böngésző biztonsági okból a **Letöltések mappába** menti a kimenetet (nem az eredeti mappába).
-- Az egyszálú WASM-kódolás lassabb és memóriaérzékenyebb a natív ffmpeg-nél: pár perces
-  klipekhez / néhány száz MB-ig kényelmes. Nagy (1 GB feletti) fájlokhoz natív ffmpeg ajánlott.
+On the very first visit the service worker installs and the page reloads once to gain
+cross-origin isolation — this is expected. After that, multithreading is active.
 
-## Technika
+## How the GitHub Pages multithreading fix works
 
-Egyetlen statikus `index.html`, build-lépés nélkül. Az ffmpeg.wasm magot a jsDelivr CDN-ről
-tölti (`@ffmpeg/ffmpeg@0.12.10`, `@ffmpeg/core@0.12.10`). Az egyszálú mag nem igényel
-`SharedArrayBuffer`-t, így sima statikus hosztolás (pl. GitHub Pages) elég — nincs szükség
-COOP/COEP fejlécekre.
+`SharedArrayBuffer` (required by multi-threaded ffmpeg.wasm) is only available in a
+**cross-origin isolated** context, which needs two HTTP response headers:
+
+```
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
+```
+
+GitHub Pages can't set custom headers, so `coi-serviceworker.js` registers a service
+worker that injects them into every response. The page then reports
+`window.crossOriginIsolated === true`, and `index.html` loads `@ffmpeg/core-mt`.
+If isolation can't be established, it transparently falls back to the single-thread core.
+
+> Note: a service worker **cannot** be inlined into the HTML — browsers only register
+> worker scripts from a real same-origin URL (not `blob:`/`data:`), so it lives in its own file.
+
+## ffmpeg loading detail
+
+The `@ffmpeg/ffmpeg` class worker must be same-origin, so it is loaded from a blob and its
+relative imports are rewritten to absolute CDN URLs (`toBlobURLPatched`). Core, wasm, and the
+pthread worker are all loaded from the jsDelivr CDN via `toBlobURL` (`esm` builds, v0.12.10).
+
+## Limits
+
+- The browser saves output to the **Downloads** folder (it can't write back to the source folder).
+- WASM encoding is heavier than native ffmpeg: comfortable for clips up to a few minutes /
+  a few hundred MB. For very large (1 GB+) files, native ffmpeg is the better tool.
