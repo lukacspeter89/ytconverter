@@ -309,7 +309,7 @@
 
 <script type="module">
 import { FFmpeg } from 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js';
-import { fetchFile, toBlobURL } from 'https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js';
+import { toBlobURL } from 'https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js';
 
 // Because the class worker runs as a module worker, we use the esm builds
 // (the core is pulled in via dynamic import(), which needs a default export).
@@ -483,7 +483,16 @@ goBtn.addEventListener('click', async () => {
     const inName = 'input' + (file.name.match(/\.[^/.]+$/)?.[0] || '.mp4');
 
     setStatus('Reading file…');
-    await ffmpeg.writeFile(inName, await fetchFile(file));
+    let inputData;
+    try {
+      inputData = new Uint8Array(await file.arrayBuffer());
+    } catch (_) {
+      throw new Error('Could not read the file — it may have been moved, renamed, or is still recording/syncing. Re-select it, or copy it to a local folder first.');
+    }
+    if (inputData.length === 0) {
+      throw new Error('The file is empty (0 bytes). If it is still being recorded, wait until it finishes, then re-select it.');
+    }
+    await ffmpeg.writeFile(inName, inputData);
 
     setStatus('Starting encode…');
     durationSec = 0; sawProgress = false;
@@ -516,8 +525,9 @@ goBtn.addEventListener('click', async () => {
     dlBtn.hidden = false;
   } catch (err) {
     console.error(err);
-    setStatus('Encoding failed — see the log / console for details.', true);
-    log('ERROR: ' + (err?.message || err));
+    const msg = err?.message || String(err);
+    setStatus(msg.length < 110 ? msg : 'Encoding failed — see the log / console for details.', true);
+    log('ERROR: ' + msg);
   } finally {
     if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
     goBtn.disabled = false;
