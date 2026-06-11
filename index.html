@@ -305,6 +305,7 @@
     Large files are read lazily (by byte range), so the whole file is never loaded into memory.
     On first run the ffmpeg.wasm core loads (~31 MB, cached afterwards).
     The finished file downloads with a <code>_small</code> suffix.
+    <span id="build" style="opacity:.6"></span>
   </p>
 </div>
 
@@ -323,6 +324,15 @@ const CORE_MT    = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core-mt@0.12.10/dist/es
 // GitHub Pages; if isolation isn't available we fall back to single-thread.
 const MULTITHREAD = self.crossOriginIsolated === true;
 const MODE = MULTITHREAD ? `multi-threaded · ${navigator.hardwareConcurrency || 'n'} cores` : 'single-threaded';
+
+// Safe logger: some browser extensions replace/strip console methods, so a bare
+// console call can throw and break the whole script. Guard every diagnostic call.
+const dbg = (...a) => { try { (console && console.log || (() => {}))(...a); } catch (_) {} };
+
+// Bump this when you deploy. It's shown in the footer and logged to the console,
+// so you can instantly tell whether the new version is actually live (vs cached).
+const BUILD = 'workerfs-2';
+dbg('[ytconverter] build:', BUILD, '· crossOriginIsolated:', self.crossOriginIsolated, '· mode:', MODE);
 
 // With WORKERFS the input is read lazily, so input size is no longer the wall —
 // the limit is the (compressed) output plus codec memory in 32-bit WASM. We allow
@@ -363,6 +373,7 @@ const fmtClock = s => {
 };
 
 setStatus(`Choose a file to begin · ${MODE}`);
+$('build').textContent = `· build ${BUILD}`;
 
 // — File selection —
 dropEl.addEventListener('click', () => fileEl.click());
@@ -546,7 +557,7 @@ goBtn.addEventListener('click', async () => {
     setStatus('Done: ' + outName);
     dlBtn.hidden = false;
   } catch (err) {
-    console.error(err);
+    dbg(err);
     let msg = err?.message || String(err);
     // Out-of-memory / abort usually means the file/output is too big for WASM.
     if (/abort|memory|out of bounds|allocation/i.test(msg)) {

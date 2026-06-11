@@ -58,25 +58,40 @@ if (typeof window === 'undefined') {
 } else {
   // ----- Page context: register self, then reload once to gain control -----
   (() => {
+    const safelog = (...a) => { try { (console && console.log || (() => {}))(...a); } catch (_) {} };
+
     // Already isolated — nothing to do, clear the reload guard.
     if (window.crossOriginIsolated) {
       sessionStorage.removeItem('coiReloaded');
       return;
     }
-    if (!window.isSecureContext || !navigator.serviceWorker) return;
+    if (!window.isSecureContext || !navigator.serviceWorker) {
+      safelog('[coi] service workers unavailable — staying single-threaded');
+      return;
+    }
 
     const reloadOnce = () => {
-      if (sessionStorage.getItem('coiReloaded')) return; // already tried — avoid loops
+      if (sessionStorage.getItem('coiReloaded')) return; // only reload once per session
       sessionStorage.setItem('coiReloaded', '1');
       window.location.reload();
     };
 
+    const swUrl = document.currentScript.src;
+
+    // When the worker activates it calls clients.claim(), which fires
+    // `controllerchange` here. The already-loaded document didn't get the
+    // isolation headers, so reload once to pass the navigation through the SW.
+    navigator.serviceWorker.addEventListener('controllerchange', reloadOnce);
+
     navigator.serviceWorker
-      .register(document.currentScript.src)
-      .then((registration) => {
-        registration.addEventListener('updatefound', reloadOnce);
-        if (registration.active && !navigator.serviceWorker.controller) reloadOnce();
+      .register(swUrl)
+      .then((reg) => {
+        // Active worker present but page isn't controlled yet → reload now.
+        if (reg.active && !navigator.serviceWorker.controller) reloadOnce();
       })
-      .catch((err) => console.error('[coi] SW registration failed:', err));
+      .catch((err) => safelog('[coi] registration failed:', err));
+
+    // Controlled already but still not isolated → one reload to apply headers.
+    if (navigator.serviceWorker.controller) reloadOnce();
   })();
 }
