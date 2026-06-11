@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- Cross-origin isolation for SharedArrayBuffer (ffmpeg multithread) on GitHub Pages.
+     Must load before anything else so it can take control and reload once. -->
+<script src="coi-serviceworker.js"></script>
+<title>Encoder · YouTube Video Optimizer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" crossorigin>
+<style>
+  :root {
+    --bg:        #0e1116;
+    --panel:     #161b22;
+    --panel-2:   #1c232c;
+    --line:      #2a323d;
+    --line-soft: #222a33;
+    --text:      #e6edf3;
+    --muted:     #8b97a6;
+    --dim:       #5c6775;
+    --signal:    #ff8a3d;   /* render / active indicator */
+    --signal-dk: #c25e1f;
+    --ok:        #4ec98b;
+    --mono: 'JetBrains Mono', ui-monospace, monospace;
+    --disp: 'Space Grotesk', system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background:
+      radial-gradient(1200px 600px at 50% -10%, #19212b 0%, var(--bg) 60%) fixed;
+    color: var(--text);
+    font-family: var(--disp);
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    padding: 40px 20px 64px;
+  }
+  .app { width: 100%; max-width: 640px; }
+
+  /* Header — encoder front-panel vibe */
+  header { margin-bottom: 22px; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.28em;
+    text-transform: uppercase;
+    color: var(--dim);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .eyebrow::after {
+    content: "";
+    height: 1px;
+    flex: 1;
+    background: linear-gradient(90deg, var(--line), transparent);
+  }
+  h1 {
+    font-size: 30px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin: 12px 0 6px;
+  }
+  h1 .accent { color: var(--signal); }
+  .sub { color: var(--muted); font-size: 14px; line-height: 1.5; max-width: 56ch; }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    overflow: hidden;
+  }
+  .panel + .panel { margin-top: 16px; }
+
+  /* Drop / file picker zone */
+  .drop {
+    padding: 34px 24px;
+    text-align: center;
+    border: 1.5px dashed var(--line);
+    border-radius: 12px;
+    margin: 18px;
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .drop:hover, .drop.over {
+    border-color: var(--signal);
+    background: rgba(255,138,61,0.04);
+  }
+  .drop .pick { font-weight: 600; font-size: 15px; }
+  .drop .pick u { color: var(--signal); text-underline-offset: 3px; }
+  .drop .hint { color: var(--dim); font-size: 12.5px; margin-top: 8px; font-family: var(--mono); }
+
+  /* Telemetry row — the signature element: input -> output readout */
+  .telemetry {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: stretch;
+    border-top: 1px solid var(--line-soft);
+  }
+  .tcol { padding: 16px 20px; }
+  .tcol.arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--dim);
+    border-left: 1px solid var(--line-soft);
+    border-right: 1px solid var(--line-soft);
+    font-family: var(--mono);
+    background: var(--panel-2);
+  }
+  .tcol .label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin-bottom: 8px;
+  }
+  .tcol .size { font-family: var(--mono); font-size: 22px; font-weight: 600; }
+  .tcol .meta { font-family: var(--mono); font-size: 11.5px; color: var(--muted); margin-top: 4px; min-height: 16px; }
+  .tcol.out .size { color: var(--signal); }
+  .delta { font-family: var(--mono); font-size: 11.5px; color: var(--ok); margin-top: 2px; min-height: 16px; }
+
+  /* Settings */
+  .controls { padding: 6px 20px 20px; }
+  .row { display: flex; align-items: center; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--line-soft); }
+  .row:last-child { border-bottom: 0; }
+  .row > .rl { flex: 1; }
+  .rl .name { font-size: 14px; font-weight: 500; }
+  .rl .desc { font-size: 12px; color: var(--dim); margin-top: 2px; }
+  .val { font-family: var(--mono); font-size: 13px; color: var(--signal); min-width: 96px; text-align: right; }
+
+  input[type="range"] {
+    -webkit-appearance: none; appearance: none;
+    width: 200px; height: 4px; border-radius: 4px;
+    background: var(--line); outline: none;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--signal); cursor: pointer; border: 3px solid var(--panel);
+    box-shadow: 0 0 0 1px var(--signal);
+  }
+  input[type="range"]::-moz-range-thumb {
+    width: 16px; height: 16px; border-radius: 50%; border: 3px solid var(--panel);
+    background: var(--signal); cursor: pointer; box-shadow: 0 0 0 1px var(--signal);
+  }
+  select {
+    font-family: var(--mono); font-size: 13px;
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 10px; cursor: pointer;
+  }
+  select:focus-visible, .drop:focus-visible, button:focus-visible {
+    outline: 2px solid var(--signal); outline-offset: 2px;
+  }
+
+  /* Render meter + button */
+  .action { padding: 20px; border-top: 1px solid var(--line-soft); }
+  .meter {
+    height: 8px; border-radius: 6px; background: var(--panel-2);
+    border: 1px solid var(--line); overflow: hidden; margin-bottom: 6px;
+  }
+  .meter > i {
+    display: block; height: 100%; width: 0%;
+    background: linear-gradient(90deg, var(--signal-dk), var(--signal));
+    transition: width .2s ease;
+  }
+  .status { font-family: var(--mono); font-size: 11.5px; color: var(--muted); min-height: 16px; }
+  .status.warn { color: var(--signal); }
+
+  button.go {
+    width: 100%; margin-top: 16px;
+    font-family: var(--disp); font-size: 15px; font-weight: 600;
+    color: #1a1208; background: var(--signal);
+    border: 0; border-radius: 10px; padding: 14px; cursor: pointer;
+    transition: filter .15s, transform .05s;
+  }
+  button.go:hover:not(:disabled) { filter: brightness(1.08); }
+  button.go:active:not(:disabled) { transform: translateY(1px); }
+  button.go:disabled { opacity: .45; cursor: not-allowed; }
+  button.dl {
+    width: 100%; margin-top: 10px;
+    font-family: var(--disp); font-size: 14px; font-weight: 600;
+    color: var(--text); background: transparent;
+    border: 1px solid var(--signal); border-radius: 10px; padding: 12px; cursor: pointer;
+  }
+  button.dl:hover { background: rgba(255,138,61,0.08); }
+
+  /* Log strip — terminal-style telemetry */
+  .log {
+    font-family: var(--mono); font-size: 11px; line-height: 1.55;
+    color: var(--dim); background: #0a0d11;
+    border-top: 1px solid var(--line-soft);
+    padding: 12px 20px; max-height: 132px; overflow-y: auto;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .log:empty { display: none; }
+
+  .note {
+    margin-top: 18px; font-size: 12px; color: var(--dim); line-height: 1.6;
+    font-family: var(--mono);
+  }
+  .note code { color: var(--muted); background: var(--panel); padding: 1px 6px; border-radius: 5px; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="eyebrow">ffmpeg.wasm · h.264 / aac</div>
+    <h1>Recording&nbsp;<span class="accent">→</span>&nbsp;YouTube</h1>
+    <p class="sub">Compress and optimize your screen recordings into YouTube-compatible MP4 directly in your browser. Your files never leave your device.</p>
+  </header>
+
+  <div class="panel">
+    <div class="drop" id="drop" tabindex="0" role="button" aria-label="Choose a video">
+      <div class="pick">Drop a video here, or <u>choose a file</u></div>
+      <div class="hint">mp4 · mkv · mov · avi · webm</div>
+    </div>
+    <input type="file" id="file" accept="video/*" hidden>
+
+    <div class="telemetry">
+      <div class="tcol in">
+        <div class="label">Input</div>
+        <div class="size" id="inSize">—</div>
+        <div class="meta" id="inMeta"></div>
+      </div>
+      <div class="tcol arrow">→</div>
+      <div class="tcol out">
+        <div class="label">Output</div>
+        <div class="size" id="outSize">—</div>
+        <div class="delta" id="delta"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="controls">
+      <div class="row">
+        <div class="rl">
+          <div class="name">Quality</div>
+          <div class="desc">Lower CRF = better image, larger file. 21–24 is ideal for screen recordings.</div>
+        </div>
+        <input type="range" id="crf" min="18" max="30" step="1" value="23">
+        <div class="val"><span id="crfVal">23</span> CRF</div>
+      </div>
+
+      <div class="row">
+        <div class="rl">
+          <div class="name">Resolution</div>
+          <div class="desc">Scales down only, keeps the aspect ratio.</div>
+        </div>
+        <select id="res">
+          <option value="0">Original</option>
+          <option value="1440">1440p</option>
+          <option value="1080" selected>1080p</option>
+          <option value="720">720p</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <div class="rl">
+          <div class="name">Frame rate</div>
+          <div class="desc">Upper limit. Static content loses very little.</div>
+        </div>
+        <select id="fps">
+          <option value="0" selected>Original</option>
+          <option value="60">60 fps</option>
+          <option value="30">30 fps</option>
+          <option value="24">24 fps</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <div class="rl">
+          <div class="name">Speed</div>
+          <div class="desc">Slower preset = smaller file but longer encode (noticeable in WASM).</div>
+        </div>
+        <select id="preset">
+          <option value="ultrafast">Ultrafast</option>
+          <option value="veryfast" selected>Very fast</option>
+          <option value="medium">Balanced</option>
+          <option value="slow">Slow</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="action">
+      <div class="meter"><i id="bar"></i></div>
+      <div class="status" id="status">Choose a file to begin.</div>
+      <button class="go" id="go" disabled>Convert</button>
+      <button class="dl" id="dl" hidden>Download</button>
+    </div>
+
+    <div class="log" id="log"></div>
+  </div>
+
+  <p class="note">
+    Your video is compressed in your browser — never uploaded, never stored on a server.
+    Large files are read lazily (by byte range), so the whole file is never loaded into memory.
+    On first run the ffmpeg.wasm core loads (~31 MB, cached afterwards).
+    The finished file downloads with a <code>_small</code> suffix.
+    <span id="build" style="opacity:.6"></span>
+  </p>
+</div>
+
+<script type="module">
+import { FFmpeg } from 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js';
+import { toBlobURL } from 'https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js';
+
+// Because the class worker runs as a module worker, we use the esm builds
+// (the core is pulled in via dynamic import(), which needs a default export).
+const FFMPEG_ESM = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm';
+const CORE_ST    = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm';     // single-thread
+const CORE_MT    = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core-mt@0.12.10/dist/esm';  // multi-thread
+
+// Multithreading needs SharedArrayBuffer, which needs cross-origin isolation.
+// The service worker (coi-serviceworker.js) provides the COOP/COEP headers on
+// GitHub Pages; if isolation isn't available we fall back to single-thread.
+const MULTITHREAD = self.crossOriginIsolated === true;
+const MODE = MULTITHREAD ? `multi-threaded · ${navigator.hardwareConcurrency || 'n'} cores` : 'single-threaded';
+
+// Safe logger: some browser extensions replace/strip console methods, so a bare
+// console call can throw and break the whole script. Guard every diagnostic call.
+const dbg = (...a) => { try { (console && console.log || (() => {}))(...a); } catch (_) {} };
+
+// Bump this when you deploy. It's shown in the footer and logged to the console,
+// so you can instantly tell whether the new version is actually live (vs cached).
+const BUILD = 'workerfs-5';
+dbg('[ytconverter] build:', BUILD,
+    '| isolated:', self.crossOriginIsolated,
+    '| controlled:', !!(navigator.serviceWorker && navigator.serviceWorker.controller),
+    '| SharedArrayBuffer:', typeof SharedArrayBuffer !== 'undefined',
+    '| mode:', MODE);
+
+// With WORKERFS the input is read lazily, so input size is no longer the wall —
+// the limit is the (compressed) output plus codec memory in 32-bit WASM. We allow
+// large files but warn, and keep a high sanity ceiling.
+const HARD_LIMIT = 6 * 1024 ** 3;    // ~6 GB sanity ceiling
+const WARN_LIMIT = 1 * 1024 ** 3;    // 1 GB — expect slow encoding
+
+// Like toBlobURL, but runs a transform on the fetched code first (e.g. rewriting
+// relative imports to absolute, so they resolve when loaded from a blob URL).
+async function toBlobURLPatched(url, mimeType, patcher) {
+  const res = await fetch(url);
+  let body = await res.text();
+  if (patcher) body = patcher(body);
+  return URL.createObjectURL(new Blob([body], { type: mimeType }));
+}
+
+const $ = id => document.getElementById(id);
+const dropEl = $('drop'), fileEl = $('file');
+const inSize = $('inSize'), inMeta = $('inMeta'), outSize = $('outSize'), delta = $('delta');
+const crf = $('crf'), crfVal = $('crfVal'), res = $('res'), fps = $('fps'), preset = $('preset');
+const bar = $('bar'), statusEl = $('status'), logEl = $('log');
+const goBtn = $('go'), dlBtn = $('dl');
+
+let ffmpeg = null, loaded = false, file = null, outBlob = null, outName = '';
+let durationSec = 0, sawProgress = false, heartbeat = null, encodeStart = 0, lastSpeed = '';
+
+const fmtBytes = b => {
+  const u = ['B','KB','MB','GB']; let i = 0, n = b;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(n < 10 && i > 0 ? 1 : 0)} ${u[i]}`;
+};
+const log = line => { logEl.textContent += line + '\n'; logEl.scrollTop = logEl.scrollHeight; };
+const setStatus = (t, warn = false) => { statusEl.textContent = t; statusEl.classList.toggle('warn', warn); };
+const setBar = p => { bar.style.width = Math.max(0, Math.min(100, p)) + '%'; };
+const fmtClock = s => {
+  s = Math.max(0, Math.floor(s));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+};
+
+// Read total duration up front from a <video> element — reliable and independent
+// of ffmpeg log parsing. Uses a blob URL (metadata only; doesn't load the whole file).
+function getDurationFromVideo(f) {
+  return new Promise(resolve => {
+    try {
+      const v = document.createElement('video');
+      v.preload = 'metadata';
+      const url = URL.createObjectURL(f);
+      const done = d => { URL.revokeObjectURL(url); resolve(Number.isFinite(d) && d > 0 ? d : 0); };
+      v.onloadedmetadata = () => done(v.duration);
+      v.onerror = () => done(0);
+      v.src = url;
+    } catch (_) { resolve(0); }
+  });
+}
+
+// Turn a current encoded-time (seconds) into a % bar + status line.
+function updateProgress(cur) {
+  const tail = lastSpeed ? ` · ${lastSpeed}` : '';
+  if (durationSec > 0) {
+    const p = Math.min(99, Math.round((cur / durationSec) * 100));
+    setBar(p);
+    setStatus(`Encoding… ${p}%${tail}`);
+  } else {
+    setStatus(`Encoding… ${fmtClock(cur)} encoded${tail}`);
+  }
+}
+
+setStatus(`Choose a file to begin · ${MODE}`);
+$('build').textContent = `· build ${BUILD}`;
+
+// — File selection —
+dropEl.addEventListener('click', () => fileEl.click());
+dropEl.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileEl.click(); } });
+fileEl.addEventListener('change', e => e.target.files[0] && selectFile(e.target.files[0]));
+['dragenter','dragover'].forEach(ev => dropEl.addEventListener(ev, e => { e.preventDefault(); dropEl.classList.add('over'); }));
+['dragleave','drop'].forEach(ev => dropEl.addEventListener(ev, e => { e.preventDefault(); dropEl.classList.remove('over'); }));
+dropEl.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) selectFile(f); });
+
+function selectFile(f) {
+  file = f;
+  outBlob = null; dlBtn.hidden = true;
+  outSize.textContent = '—'; delta.textContent = '';
+  setBar(0);
+  inSize.textContent = fmtBytes(f.size);
+  inMeta.textContent = f.name.length > 30 ? f.name.slice(0, 27) + '…' : f.name;
+  dropEl.querySelector('.pick').innerHTML = 'Selected: <u>' + (f.name.length > 34 ? f.name.slice(0,31) + '…' : f.name) + '</u>';
+  goBtn.disabled = false;
+  if (f.size === 0) {
+    goBtn.disabled = true;
+    setStatus('The file is empty (0 bytes). If it is still recording, wait for it to finish, then re-select.', true);
+  } else if (f.size > HARD_LIMIT) {
+    goBtn.disabled = true;
+    setStatus(`Very large (${fmtBytes(f.size)}). This is beyond what in-browser encoding can handle — use the native ffmpeg script.`, true);
+  } else if (f.size > WARN_LIMIT) {
+    setStatus(`Large file (${fmtBytes(f.size)}) — read lazily, so it should work, but encoding will be slow. Native ffmpeg is faster for files this size.`, true);
+  } else {
+    setStatus(`Ready to convert · ${MODE}`);
+  }
+}
+
+crf.addEventListener('input', () => crfVal.textContent = crf.value);
+
+// — Load ffmpeg (once) —
+async function ensureLoaded() {
+  if (loaded) return;
+  ffmpeg = new FFmpeg();
+
+  // The built-in `progress` event (from the core's setProgress) is the reliable
+  // source — it fires during exec. The log is parsed only as a secondary source.
+  ffmpeg.on('log', ({ message }) => {
+    log(message);
+    const d = message.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+    if (d && !durationSec) durationSec = (+d[1]) * 3600 + (+d[2]) * 60 + parseFloat(d[3]);
+    const sp = message.match(/speed=\s*([\d.]+)x/);
+    if (sp) lastSpeed = sp[1] + 'x';
+    const t = message.match(/(?:^|\s)time=\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+    if (t) { sawProgress = true; updateProgress((+t[1]) * 3600 + (+t[2]) * 60 + parseFloat(t[3])); }
+  });
+
+  let progressLogged = false;
+  ffmpeg.on('progress', (e) => {
+    if (!progressLogged) { progressLogged = true; dbg('[ytconverter] first progress event:', JSON.stringify(e)); }
+    const t = (typeof e?.time === 'number') ? e.time / 1e6 : null;        // microseconds → seconds
+    const prog = (typeof e?.progress === 'number') ? e.progress : null;  // 0..1 ratio
+    let cur = null;
+    if (t != null && t > 0) cur = t;
+    else if (prog != null && prog > 0 && durationSec > 0) cur = prog * durationSec;
+    if (cur != null) {
+      sawProgress = true;
+      updateProgress(cur);
+    } else if (prog != null && prog > 0 && prog <= 1.2) {
+      sawProgress = true;
+      const p = Math.min(99, Math.round(prog * 100));
+      setBar(p);
+      setStatus(`Encoding… ${p}%${lastSpeed ? ' · ' + lastSpeed : ''}`);
+    }
+  });
+  setStatus(`Loading ffmpeg core (~31 MB, one-time · ${MODE})…`);
+
+  // The worker's top-level script must be same-origin (browsers refuse to start
+  // a Worker from a different origin). So we load it from a blob and rewrite its
+  // internal relative imports (./const.js, ./errors.js) to absolute CDN URLs —
+  // which module workers can load cross-origin via CORS.
+  const classWorkerURL = await toBlobURLPatched(
+    `${FFMPEG_ESM}/worker.js`,
+    'text/javascript',
+    code => code.replace(/((?:from|import)\s*\(?\s*["'])\.\//g, `$1${FFMPEG_ESM}/`)
+  );
+
+  const base = MULTITHREAD ? CORE_MT : CORE_ST;
+  const config = {
+    classWorkerURL,
+    coreURL: await toBlobURL(`${base}/ffmpeg-core.js`, 'text/javascript'),
+    wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm'),
+  };
+  // The multi-thread core needs its own pthread worker (same-origin via blob).
+  if (MULTITHREAD) {
+    config.workerURL = await toBlobURL(`${base}/ffmpeg-core.worker.js`, 'text/javascript');
+  }
+
+  await ffmpeg.load(config);
+  loaded = true;
+}
+
+// — Conversion —
+function buildArgs(inName, outFile) {
+  const filters = [];
+  const h = parseInt(res.value, 10);
+  if (h > 0) filters.push(`scale=-2:min(${h}\\,ih)`);   // comma escaped inside the filtergraph
+  const f = parseInt(fps.value, 10);
+  if (f > 0) filters.push(`fps=${f}`);
+
+  const args = ['-i', inName];
+  if (filters.length) args.push('-vf', filters.join(','));
+  args.push(
+    '-c:v', 'libx264',
+    '-preset', preset.value,
+    '-crf', crf.value,
+    '-pix_fmt', 'yuv420p',
+    '-profile:v', 'high',
+    '-movflags', '+faststart',
+    '-c:a', 'aac', '-b:a', '128k', '-ar', '48000',
+    outFile
+  );
+  return args;
+}
+
+goBtn.addEventListener('click', async () => {
+  if (!file) return;
+  goBtn.disabled = true; dlBtn.hidden = true; outBlob = null;
+  logEl.textContent = ''; setBar(0);
+
+  const MNT = '/mnt_in';
+  const inExt = file.name.match(/\.[^/.]+$/)?.[0] || '.mp4';
+  const inName = 'src' + inExt;
+  let mounted = false;
+
+  try {
+    await ensureLoaded();
+
+    const stem = file.name.replace(/\.[^/.]+$/, '');
+    outName = stem + '_small.mp4';
+
+    // Mount the file via WORKERFS so ffmpeg reads it lazily, by byte range,
+    // instead of loading the whole thing into memory. This is what makes
+    // multi-GB files work in the browser — nothing is uploaded or stored.
+    setStatus('Preparing input (streamed, not loaded into memory)…');
+    try { await ffmpeg.deleteDir(MNT); } catch (_) {}
+    await ffmpeg.createDir(MNT);
+    try {
+      await ffmpeg.mount('WORKERFS', { blobs: [{ name: inName, data: file }] }, MNT);
+      mounted = true;
+    } catch (e) {
+      // Fallback: older environments without WORKERFS — load into memory.
+      // Only viable for smaller files.
+      if (file.size > 1024 ** 3) {
+        throw new Error('This browser can\u2019t stream large files (WORKERFS unavailable). Use the native ffmpeg script for files this size.');
+      }
+      const buf = new Uint8Array(await file.arrayBuffer());
+      await ffmpeg.writeFile(inName, buf);
+    }
+    const inputPath = mounted ? `${MNT}/${inName}` : inName;
+
+    setStatus('Reading video length…');
+    durationSec = await getDurationFromVideo(file);
+    sawProgress = false; lastSpeed = '';
+
+    setStatus('Starting encode…');
+    encodeStart = performance.now();
+    // Heartbeat: shows elapsed time until the first progress line arrives,
+    // so the UI never looks frozen during the silent startup of the encode.
+    heartbeat = setInterval(() => {
+      if (sawProgress) return;
+      const el = (performance.now() - encodeStart) / 1000;
+      const len = durationSec > 0 ? ` · video ${fmtClock(durationSec)}` : '';
+      setStatus(`Encoding… starting (${fmtClock(el)} elapsed${len})`);
+    }, 1000);
+
+    const t0 = performance.now();
+    await ffmpeg.exec(buildArgs(inputPath, 'output.mp4'));
+    clearInterval(heartbeat); heartbeat = null;
+    const secs = ((performance.now() - t0) / 1000).toFixed(1);
+
+    const data = await ffmpeg.readFile('output.mp4');
+    outBlob = new Blob([data.buffer], { type: 'video/mp4' });
+
+    setBar(100);
+    outSize.textContent = fmtBytes(outBlob.size);
+    const pct = Math.round((1 - outBlob.size / file.size) * 100);
+    delta.textContent = (pct >= 0 ? '−' : '+') + Math.abs(pct) + '% · ' + secs + ' s';
+    delta.style.color = pct >= 0 ? 'var(--ok)' : 'var(--signal)';
+    setStatus('Done: ' + outName);
+    dlBtn.hidden = false;
+  } catch (err) {
+    dbg(err);
+    let msg = err?.message || String(err);
+    // Out-of-memory / abort usually means the file/output is too big for WASM.
+    if (/abort|memory|out of bounds|allocation/i.test(msg)) {
+      msg = 'Ran out of memory — this file is too long/large for in-browser encoding. Use the native ffmpeg script instead.';
+    }
+    setStatus(msg.length < 130 ? msg : 'Encoding failed — see the log / console for details.', true);
+    log('ERROR: ' + msg);
+  } finally {
+    if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
+    // Clean up the virtual filesystem (unmount first, then remove temp files).
+    if (mounted) { try { await ffmpeg.unmount(MNT); } catch (_) {} }
+    try { await ffmpeg.deleteDir(MNT); } catch (_) {}
+    try { await ffmpeg.deleteFile('output.mp4'); } catch (_) {}
+    if (!mounted) { try { await ffmpeg.deleteFile(inName); } catch (_) {} }
+    goBtn.disabled = false;
+  }
+});
+
+dlBtn.addEventListener('click', () => {
+  if (!outBlob) return;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(outBlob);
+  a.download = outName;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+});
+</script>
+</body>
+</html>
