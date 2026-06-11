@@ -308,7 +308,18 @@
 import { FFmpeg } from 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js';
 import { fetchFile, toBlobURL } from 'https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js';
 
-const CORE = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd';
+// Modul-worker miatt az esm változatokat használjuk (a core-t import()-tal tölti).
+const FFMPEG_ESM = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm';
+const CORE       = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm';
+
+// Mint toBlobURL, de a letöltött kódon még futtat egy átírást (pl. relatív
+// importok abszolútra cserélése), hogy blob-ból is feloldódjanak.
+async function toBlobURLPatched(url, mimeType, patcher) {
+  const res = await fetch(url);
+  let body = await res.text();
+  if (patcher) body = patcher(body);
+  return URL.createObjectURL(new Blob([body], { type: mimeType }));
+}
 
 const $ = id => document.getElementById(id);
 const dropEl = $('drop'), fileEl = $('file');
@@ -364,7 +375,19 @@ async function ensureLoaded() {
     if (p >= 0 && p <= 100) { setBar(p); setStatus('Kódolás… ' + p + '%'); }
   });
   setStatus('ffmpeg betöltése (~31 MB, egyszer)…');
+
+  // A worker top-level scriptjének azonos origin-ról kell jönnie (a böngésző
+  // nem enged más originról Worker-t indítani). Ezért blob-ból töltjük, és a
+  // worker belső relatív importjait (./const.js, ./errors.js) abszolút CDN-re
+  // írjuk át — ezek modul-workerben CORS-szal már betölthetők.
+  const classWorkerURL = await toBlobURLPatched(
+    `${FFMPEG_ESM}/worker.js`,
+    'text/javascript',
+    code => code.replace(/((?:from|import)\s*\(?\s*["'])\.\//g, `$1${FFMPEG_ESM}/`)
+  );
+
   await ffmpeg.load({
+    classWorkerURL,
     coreURL: await toBlobURL(`${CORE}/ffmpeg-core.js`, 'text/javascript'),
     wasmURL: await toBlobURL(`${CORE}/ffmpeg-core.wasm`, 'application/wasm'),
   });
