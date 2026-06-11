@@ -340,6 +340,7 @@ const bar = $('bar'), statusEl = $('status'), logEl = $('log');
 const goBtn = $('go'), dlBtn = $('dl');
 
 let ffmpeg = null, loaded = false, file = null, outBlob = null, outName = '';
+let durationSec = 0, sawProgress = false, heartbeat = null, encodeStart = 0;
 
 const fmtBytes = b => {
   const u = ['B','KB','MB','GB']; let i = 0, n = b;
@@ -349,6 +350,10 @@ const fmtBytes = b => {
 const log = line => { logEl.textContent += line + '\n'; logEl.scrollTop = logEl.scrollHeight; };
 const setStatus = (t, warn = false) => { statusEl.textContent = t; statusEl.classList.toggle('warn', warn); };
 const setBar = p => { bar.style.width = Math.max(0, Math.min(100, p)) + '%'; };
+const fmtClock = s => {
+  s = Math.max(0, Math.floor(s));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+};
 
 setStatus(`Choose a file to begin · ${MODE}`);
 
@@ -382,10 +387,38 @@ crf.addEventListener('input', () => crfVal.textContent = crf.value);
 async function ensureLoaded() {
   if (loaded) return;
   ffmpeg = new FFmpeg();
-  ffmpeg.on('log', ({ message }) => log(message));
+
+  // Primary progress source: parse ffmpeg's own log. The `progress` event is
+  // experimental and frequently silent, so we derive progress from the
+  // `Duration:` line and the running `time=` / `speed=` stats instead.
+  ffmpeg.on('log', ({ message }) => {
+    log(message);
+
+    const d = message.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+    if (d) durationSec = (+d[1]) * 3600 + (+d[2]) * 60 + parseFloat(d[3]);
+
+    const t = message.match(/time=\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+    if (t) {
+      sawProgress = true;
+      const cur = (+t[1]) * 3600 + (+t[2]) * 60 + parseFloat(t[3]);
+      const sp = message.match(/speed=\s*([\d.]+x)/);
+      const tail = sp ? ` · ${sp[1]}` : '';
+      if (durationSec > 0) {
+        const p = Math.min(99, Math.round((cur / durationSec) * 100));
+        setBar(p);
+        setStatus(`Encoding… ${p}%${tail}`);
+      } else {
+        setStatus(`Encoding… ${fmtClock(cur)} done${tail}`);
+      }
+    }
+  });
+
+  // Fallback only — if the experimental event does fire, use it before any
+  // log-based time= line has arrived.
   ffmpeg.on('progress', ({ progress }) => {
+    if (sawProgress) return;
     const p = Math.round(progress * 100);
-    if (p >= 0 && p <= 100) { setBar(p); setStatus('Encoding… ' + p + '%'); }
+    if (p > 0 && p <= 100) setBar(p);
   });
   setStatus(`Loading ffmpeg core (~31 MB, one-time · ${MODE})…`);
 
@@ -453,8 +486,19 @@ goBtn.addEventListener('click', async () => {
     await ffmpeg.writeFile(inName, await fetchFile(file));
 
     setStatus('Starting encode…');
+    durationSec = 0; sawProgress = false;
+    encodeStart = performance.now();
+    // Heartbeat: shows elapsed time until ffmpeg emits its first time= line,
+    // so the UI never looks frozen during the silent startup of the encode.
+    heartbeat = setInterval(() => {
+      if (sawProgress) return;
+      const el = (performance.now() - encodeStart) / 1000;
+      setStatus(`Encoding… working (${fmtClock(el)} elapsed)`);
+    }, 1000);
+
     const t0 = performance.now();
     await ffmpeg.exec(buildArgs(inName, 'output.mp4'));
+    clearInterval(heartbeat); heartbeat = null;
     const secs = ((performance.now() - t0) / 1000).toFixed(1);
 
     const data = await ffmpeg.readFile('output.mp4');
@@ -475,6 +519,7 @@ goBtn.addEventListener('click', async () => {
     setStatus('Encoding failed — see the log / console for details.', true);
     log('ERROR: ' + (err?.message || err));
   } finally {
+    if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
     goBtn.disabled = false;
   }
 });
