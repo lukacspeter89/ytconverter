@@ -331,8 +331,12 @@ const dbg = (...a) => { try { (console && console.log || (() => {}))(...a); } ca
 
 // Bump this when you deploy. It's shown in the footer and logged to the console,
 // so you can instantly tell whether the new version is actually live (vs cached).
-const BUILD = 'workerfs-2';
-dbg('[ytconverter] build:', BUILD, '· crossOriginIsolated:', self.crossOriginIsolated, '· mode:', MODE);
+const BUILD = 'workerfs-4';
+dbg('[ytconverter] build:', BUILD,
+    '| isolated:', self.crossOriginIsolated,
+    '| controlled:', !!(navigator.serviceWorker && navigator.serviceWorker.controller),
+    '| SharedArrayBuffer:', typeof SharedArrayBuffer !== 'undefined',
+    '| mode:', MODE);
 
 // With WORKERFS the input is read lazily, so input size is no longer the wall —
 // the limit is the (compressed) output plus codec memory in 32-bit WASM. We allow
@@ -357,7 +361,7 @@ const bar = $('bar'), statusEl = $('status'), logEl = $('log');
 const goBtn = $('go'), dlBtn = $('dl');
 
 let ffmpeg = null, loaded = false, file = null, outBlob = null, outName = '';
-let durationSec = 0, sawProgress = false, heartbeat = null, encodeStart = 0;
+let durationSec = 0, sawProgress = false, heartbeat = null, encodeStart = 0, lastSpeed = '';
 
 const fmtBytes = b => {
   const u = ['B','KB','MB','GB']; let i = 0, n = b;
@@ -371,6 +375,34 @@ const fmtClock = s => {
   s = Math.max(0, Math.floor(s));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 };
+
+// Read total duration up front from a <video> element — reliable and independent
+// of ffmpeg log parsing. Uses a blob URL (metadata only; doesn't load the whole file).
+function getDurationFromVideo(f) {
+  return new Promise(resolve => {
+    try {
+      const v = document.createElement('video');
+      v.preload = 'metadata';
+      const url = URL.createObjectURL(f);
+      const done = d => { URL.revokeObjectURL(url); resolve(Number.isFinite(d) && d > 0 ? d : 0); };
+      v.onloadedmetadata = () => done(v.duration);
+      v.onerror = () => done(0);
+      v.src = url;
+    } catch (_) { resolve(0); }
+  });
+}
+
+// Turn a current encoded-time (seconds) into a % bar + status line.
+function updateProgress(cur) {
+  const tail = lastSpeed ? ` · ${lastSpeed}` : '';
+  if (durationSec > 0) {
+    const p = Math.min(99, Math.round((cur / durationSec) * 100));
+    setBar(p);
+    setStatus(`Encoding… ${p}%${tail}`);
+  } else {
+    setStatus(`Encoding… ${fmtClock(cur)} encoded${tail}`);
+  }
+}
 
 setStatus(`Choose a file to begin · ${MODE}`);
 $('build').textContent = `· build ${BUILD}`;
@@ -412,33 +444,34 @@ async function ensureLoaded() {
   if (loaded) return;
   ffmpeg = new FFmpeg();
 
-  // Primary progress source: parse ffmpeg's own log. The `progress` event is
-  // experimental and frequently silent, so we derive progress from the
-  // `Duration:` line and the running `time=` / `speed=` stats instead.
+  // Progress source: ffmpeg's `-progress pipe:1` emits newline-terminated
+  // key=value lines (out_time_us=…), which flush immediately in WASM — unlike
+  // the \r-updated human stats line, which gets buffered until the end. We parse
+  // those for a reliable percentage and keep the visible log clean.
   ffmpeg.on('log', ({ message }) => {
-    log(message);
+    const msg = message;
 
-    const d = message.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
-    if (d) durationSec = (+d[1]) * 3600 + (+d[2]) * 60 + parseFloat(d[3]);
-
-    const t = message.match(/time=\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
-    if (t) {
+    // Machine-readable progress line from -progress.
+    const us = msg.match(/out_time_us=(\d+)/);
+    if (us) {
       sawProgress = true;
-      const cur = (+t[1]) * 3600 + (+t[2]) * 60 + parseFloat(t[3]);
-      const sp = message.match(/speed=\s*([\d.]+x)/);
-      const tail = sp ? ` · ${sp[1]}` : '';
-      if (durationSec > 0) {
-        const p = Math.min(99, Math.round((cur / durationSec) * 100));
-        setBar(p);
-        setStatus(`Encoding… ${p}%${tail}`);
-      } else {
-        setStatus(`Encoding… ${fmtClock(cur)} done${tail}`);
-      }
+      updateProgress(parseInt(us[1], 10) / 1e6);
+      return;
     }
+    const sp = msg.match(/speed=\s*([\d.]+)x/);
+    if (sp) lastSpeed = sp[1] + 'x';
+
+    // Skip the rest of the -progress key=value dump from the visible log.
+    if (/^(frame|fps|stream_|bitrate|total_size|out_time|dup_frames|drop_frames|speed|progress|q)=/.test(msg.trim())) {
+      return;
+    }
+
+    log(msg);
+    const d = msg.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+    if (d && !durationSec) durationSec = (+d[1]) * 3600 + (+d[2]) * 60 + parseFloat(d[3]);
   });
 
-  // Fallback only — if the experimental event does fire, use it before any
-  // log-based time= line has arrived.
+  // Last-resort fallback if -progress yields nothing (keeps the bar moving).
   ffmpeg.on('progress', ({ progress }) => {
     if (sawProgress) return;
     const p = Math.round(progress * 100);
@@ -479,7 +512,7 @@ function buildArgs(inName, outFile) {
   const f = parseInt(fps.value, 10);
   if (f > 0) filters.push(`fps=${f}`);
 
-  const args = ['-i', inName];
+  const args = ['-i', inName, '-progress', 'pipe:1'];
   if (filters.length) args.push('-vf', filters.join(','));
   args.push(
     '-c:v', 'libx264',
@@ -530,15 +563,18 @@ goBtn.addEventListener('click', async () => {
     }
     const inputPath = mounted ? `${MNT}/${inName}` : inName;
 
+    setStatus('Reading video length…');
+    durationSec = await getDurationFromVideo(file);
+    sawProgress = false; lastSpeed = '';
+
     setStatus('Starting encode…');
-    durationSec = 0; sawProgress = false;
     encodeStart = performance.now();
-    // Heartbeat: shows elapsed time until ffmpeg emits its first time= line,
+    // Heartbeat: shows elapsed time until the first progress line arrives,
     // so the UI never looks frozen during the silent startup of the encode.
     heartbeat = setInterval(() => {
       if (sawProgress) return;
       const el = (performance.now() - encodeStart) / 1000;
-      setStatus(`Encoding… working (${fmtClock(el)} elapsed)`);
+      setStatus(`Encoding… starting (${fmtClock(el)} elapsed)`);
     }, 1000);
 
     const t0 = performance.now();

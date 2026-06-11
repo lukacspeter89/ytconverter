@@ -14,6 +14,10 @@
  * Approach based on the well-known coi-serviceworker pattern (MIT, Guido Zuidhof).
  */
 
+// Bump COI_BUILD when you change this file, so the console confirms the new
+// service worker is actually live (vs a cached old one).
+const COI_BUILD = 'coi-2';
+
 if (typeof window === 'undefined') {
   // ----- Service Worker context -----
   self.addEventListener('install', () => self.skipWaiting());
@@ -59,10 +63,13 @@ if (typeof window === 'undefined') {
   // ----- Page context: register self, then reload once to gain control -----
   (() => {
     const safelog = (...a) => { try { (console && console.log || (() => {}))(...a); } catch (_) {} };
+    safelog('[coi] page script:', COI_BUILD,
+            '| isolated:', window.crossOriginIsolated,
+            '| controlled:', !!navigator.serviceWorker?.controller);
 
-    // Already isolated — nothing to do, clear the reload guard.
+    // Already isolated — nothing to do, reset the attempt counter.
     if (window.crossOriginIsolated) {
-      sessionStorage.removeItem('coiReloaded');
+      sessionStorage.removeItem('coiAttempts');
       return;
     }
     if (!window.isSecureContext || !navigator.serviceWorker) {
@@ -70,28 +77,33 @@ if (typeof window === 'undefined') {
       return;
     }
 
-    const reloadOnce = () => {
-      if (sessionStorage.getItem('coiReloaded')) return; // only reload once per session
-      sessionStorage.setItem('coiReloaded', '1');
+    // Allow up to 2 reload attempts per tab session, then give up (single-thread)
+    // so we never get stuck in a reload loop if isolation can't be achieved.
+    const attempts = +(sessionStorage.getItem('coiAttempts') || 0);
+    const reloadOnce = (why) => {
+      if (attempts >= 2) {
+        safelog('[coi] isolation not achieved after retries — staying single-threaded');
+        return;
+      }
+      sessionStorage.setItem('coiAttempts', String(attempts + 1));
+      safelog('[coi] reloading to apply isolation headers —', why);
       window.location.reload();
     };
 
     const swUrl = document.currentScript.src;
 
-    // When the worker activates it calls clients.claim(), which fires
-    // `controllerchange` here. The already-loaded document didn't get the
-    // isolation headers, so reload once to pass the navigation through the SW.
-    navigator.serviceWorker.addEventListener('controllerchange', reloadOnce);
+    // When the worker activates it calls clients.claim(), firing controllerchange.
+    navigator.serviceWorker.addEventListener('controllerchange', () => reloadOnce('controllerchange'));
 
     navigator.serviceWorker
       .register(swUrl)
       .then((reg) => {
-        // Active worker present but page isn't controlled yet → reload now.
-        if (reg.active && !navigator.serviceWorker.controller) reloadOnce();
+        safelog('[coi] registered, scope:', reg.scope, '| active:', !!reg.active);
+        if (reg.active && !navigator.serviceWorker.controller) reloadOnce('active-not-controlling');
       })
       .catch((err) => safelog('[coi] registration failed:', err));
 
     // Controlled already but still not isolated → one reload to apply headers.
-    if (navigator.serviceWorker.controller) reloadOnce();
+    if (navigator.serviceWorker.controller) reloadOnce('controlled-not-isolated');
   })();
 }
