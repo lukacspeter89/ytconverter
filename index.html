@@ -301,7 +301,8 @@
   </div>
 
   <p class="note">
-    Your video is compressed in your browser — it is never uploaded; your device does the encoding.
+    Your video is compressed in your browser — never uploaded, never stored on a server.
+    Large files are read lazily (by byte range), so the whole file is never loaded into memory.
     On first run the ffmpeg.wasm core loads (~31 MB, cached afterwards).
     The finished file downloads with a <code>_small</code> suffix.
   </p>
@@ -322,6 +323,12 @@ const CORE_MT    = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core-mt@0.12.10/dist/es
 // GitHub Pages; if isolation isn't available we fall back to single-thread.
 const MULTITHREAD = self.crossOriginIsolated === true;
 const MODE = MULTITHREAD ? `multi-threaded · ${navigator.hardwareConcurrency || 'n'} cores` : 'single-threaded';
+
+// With WORKERFS the input is read lazily, so input size is no longer the wall —
+// the limit is the (compressed) output plus codec memory in 32-bit WASM. We allow
+// large files but warn, and keep a high sanity ceiling.
+const HARD_LIMIT = 6 * 1024 ** 3;    // ~6 GB sanity ceiling
+const WARN_LIMIT = 1 * 1024 ** 3;    // 1 GB — expect slow encoding
 
 // Like toBlobURL, but runs a transform on the fetched code first (e.g. rewriting
 // relative imports to absolute, so they resolve when loaded from a blob URL).
@@ -374,8 +381,14 @@ function selectFile(f) {
   inMeta.textContent = f.name.length > 30 ? f.name.slice(0, 27) + '…' : f.name;
   dropEl.querySelector('.pick').innerHTML = 'Selected: <u>' + (f.name.length > 34 ? f.name.slice(0,31) + '…' : f.name) + '</u>';
   goBtn.disabled = false;
-  if (f.size > 500 * 1024 * 1024) {
-    setStatus('Large file (' + fmtBytes(f.size) + ') — browser memory may be a constraint.', true);
+  if (f.size === 0) {
+    goBtn.disabled = true;
+    setStatus('The file is empty (0 bytes). If it is still recording, wait for it to finish, then re-select.', true);
+  } else if (f.size > HARD_LIMIT) {
+    goBtn.disabled = true;
+    setStatus(`Very large (${fmtBytes(f.size)}). This is beyond what in-browser encoding can handle — use the native ffmpeg script.`, true);
+  } else if (f.size > WARN_LIMIT) {
+    setStatus(`Large file (${fmtBytes(f.size)}) — read lazily, so it should work, but encoding will be slow. Native ffmpeg is faster for files this size.`, true);
   } else {
     setStatus(`Ready to convert · ${MODE}`);
   }
@@ -475,24 +488,36 @@ goBtn.addEventListener('click', async () => {
   goBtn.disabled = true; dlBtn.hidden = true; outBlob = null;
   logEl.textContent = ''; setBar(0);
 
+  const MNT = '/mnt_in';
+  const inExt = file.name.match(/\.[^/.]+$/)?.[0] || '.mp4';
+  const inName = 'src' + inExt;
+  let mounted = false;
+
   try {
     await ensureLoaded();
 
     const stem = file.name.replace(/\.[^/.]+$/, '');
     outName = stem + '_small.mp4';
-    const inName = 'input' + (file.name.match(/\.[^/.]+$/)?.[0] || '.mp4');
 
-    setStatus('Reading file…');
-    let inputData;
+    // Mount the file via WORKERFS so ffmpeg reads it lazily, by byte range,
+    // instead of loading the whole thing into memory. This is what makes
+    // multi-GB files work in the browser — nothing is uploaded or stored.
+    setStatus('Preparing input (streamed, not loaded into memory)…');
+    try { await ffmpeg.deleteDir(MNT); } catch (_) {}
+    await ffmpeg.createDir(MNT);
     try {
-      inputData = new Uint8Array(await file.arrayBuffer());
-    } catch (_) {
-      throw new Error('Could not read the file — it may have been moved, renamed, or is still recording/syncing. Re-select it, or copy it to a local folder first.');
+      await ffmpeg.mount('WORKERFS', { blobs: [{ name: inName, data: file }] }, MNT);
+      mounted = true;
+    } catch (e) {
+      // Fallback: older environments without WORKERFS — load into memory.
+      // Only viable for smaller files.
+      if (file.size > 1024 ** 3) {
+        throw new Error('This browser can\u2019t stream large files (WORKERFS unavailable). Use the native ffmpeg script for files this size.');
+      }
+      const buf = new Uint8Array(await file.arrayBuffer());
+      await ffmpeg.writeFile(inName, buf);
     }
-    if (inputData.length === 0) {
-      throw new Error('The file is empty (0 bytes). If it is still being recorded, wait until it finishes, then re-select it.');
-    }
-    await ffmpeg.writeFile(inName, inputData);
+    const inputPath = mounted ? `${MNT}/${inName}` : inName;
 
     setStatus('Starting encode…');
     durationSec = 0; sawProgress = false;
@@ -506,15 +531,12 @@ goBtn.addEventListener('click', async () => {
     }, 1000);
 
     const t0 = performance.now();
-    await ffmpeg.exec(buildArgs(inName, 'output.mp4'));
+    await ffmpeg.exec(buildArgs(inputPath, 'output.mp4'));
     clearInterval(heartbeat); heartbeat = null;
     const secs = ((performance.now() - t0) / 1000).toFixed(1);
 
     const data = await ffmpeg.readFile('output.mp4');
     outBlob = new Blob([data.buffer], { type: 'video/mp4' });
-
-    // clean up the virtual filesystem
-    try { await ffmpeg.deleteFile(inName); await ffmpeg.deleteFile('output.mp4'); } catch (_) {}
 
     setBar(100);
     outSize.textContent = fmtBytes(outBlob.size);
@@ -525,11 +547,20 @@ goBtn.addEventListener('click', async () => {
     dlBtn.hidden = false;
   } catch (err) {
     console.error(err);
-    const msg = err?.message || String(err);
-    setStatus(msg.length < 110 ? msg : 'Encoding failed — see the log / console for details.', true);
+    let msg = err?.message || String(err);
+    // Out-of-memory / abort usually means the file/output is too big for WASM.
+    if (/abort|memory|out of bounds|allocation/i.test(msg)) {
+      msg = 'Ran out of memory — this file is too long/large for in-browser encoding. Use the native ffmpeg script instead.';
+    }
+    setStatus(msg.length < 130 ? msg : 'Encoding failed — see the log / console for details.', true);
     log('ERROR: ' + msg);
   } finally {
     if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
+    // Clean up the virtual filesystem (unmount first, then remove temp files).
+    if (mounted) { try { await ffmpeg.unmount(MNT); } catch (_) {} }
+    try { await ffmpeg.deleteDir(MNT); } catch (_) {}
+    try { await ffmpeg.deleteFile('output.mp4'); } catch (_) {}
+    if (!mounted) { try { await ffmpeg.deleteFile(inName); } catch (_) {} }
     goBtn.disabled = false;
   }
 });

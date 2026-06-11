@@ -54,8 +54,15 @@ The `@ffmpeg/ffmpeg` class worker must be same-origin, so it is loaded from a bl
 relative imports are rewritten to absolute CDN URLs (`toBlobURLPatched`). Core, wasm, and the
 pthread worker are all loaded from the jsDelivr CDN via `toBlobURL` (`esm` builds, v0.12.10).
 
+## Large files
+
+The input is mounted via **WORKERFS** and read **lazily, by byte range**, so the whole
+file is never loaded into memory or uploaded anywhere. This makes multi-GB inputs possible
+in the browser — only the (much smaller, compressed) output lives in WASM memory.
+
 ## Limits
 
 - The browser saves output to the **Downloads** folder (it can't write back to the source folder).
-- WASM encoding is heavier than native ffmpeg: comfortable for clips up to a few minutes /
-  a few hundred MB. For very large (1 GB+) files, native ffmpeg is the better tool.
+- Encoding still runs in 32-bit WASM, so it is far slower than native ffmpeg and the *output*
+  must fit in memory. Very long recordings can still run out of memory; for those, or when you
+  just want speed, the native `yt_convert.py` script is the better tool.
